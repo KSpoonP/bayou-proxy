@@ -1,10 +1,8 @@
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 const https = require('https');
 const http = require('http');
-const url = require('url');
 
-// Headers that reveal embedding or cause frame blocking
-const BLOCKED_HEADERS = [
+const STRIP_HEADERS = [
   'x-frame-options',
   'content-security-policy',
   'content-security-policy-report-only',
@@ -18,7 +16,6 @@ exports.handler = async (event) => {
   const target = event.queryStringParameters?.url;
   if (!target) return { statusCode: 400, body: 'Missing url param' };
 
-  // Handle CORS preflight
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 204,
@@ -47,14 +44,10 @@ exports.handler = async (event) => {
           'Accept-Language': 'en-US,en;q=0.5',
           'Accept-Encoding': 'identity',
           'Upgrade-Insecure-Requests': '1',
-          'Sec-Fetch-Dest': 'document',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'none',
         },
       };
 
       const req = mod.request(options, (res) => {
-        // Strip frame-blocking and CSP headers
         const safeHeaders = {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -62,12 +55,21 @@ exports.handler = async (event) => {
         };
 
         for (const [key, val] of Object.entries(res.headers)) {
-          if (!BLOCKED_HEADERS.includes(key.toLowerCase())) {
+          const k = key.toLowerCase();
+          if (STRIP_HEADERS.includes(k)) continue;
+          // Netlify can't handle array headers — flatten to string
+          if (Array.isArray(val)) {
+            if (k === 'set-cookie') {
+              // skip set-cookie entirely to avoid the error
+              continue;
+            }
+            safeHeaders[key] = val.join(', ');
+          } else {
             safeHeaders[key] = val;
           }
         }
 
-        // Rewrite location headers for redirects
+        // Rewrite redirects through proxy
         if (safeHeaders['location']) {
           try {
             const redirectUrl = new URL(safeHeaders['location'], target).toString();
@@ -83,22 +85,15 @@ exports.handler = async (event) => {
           const isText = ct.includes('text') || ct.includes('javascript') || ct.includes('json') || ct.includes('xml');
 
           if (isText) {
-            // Rewrite absolute URLs in HTML/JS to go through proxy
             let text = body.toString('utf8');
-            const baseUrl = `${parsed.protocol}//${parsed.hostname}`;
-
-            // Rewrite fetch/XHR/src/href to proxy URLs where possible
+            // Rewrite absolute URLs through proxy
             text = text
               .replace(/(src|href|action)="(https?:\/\/[^"]+)"/gi, (_, attr, u) =>
                 `${attr}="/.netlify/functions/proxy?url=${encodeURIComponent(u)}"`)
               .replace(/(src|href|action)='(https?:\/\/[^']+)'/gi, (_, attr, u) =>
                 `${attr}='/.netlify/functions/proxy?url=${encodeURIComponent(u)}'`);
 
-            resolve({
-              statusCode: res.statusCode || 200,
-              headers: safeHeaders,
-              body: text,
-            });
+            resolve({ statusCode: res.statusCode || 200, headers: safeHeaders, body: text });
           } else {
             resolve({
               statusCode: res.statusCode || 200,
@@ -110,10 +105,7 @@ exports.handler = async (event) => {
         });
       });
 
-      req.on('error', (e) => {
-        resolve({ statusCode: 500, body: 'Proxy error: ' + e.message });
-      });
-
+      req.on('error', (e) => resolve({ statusCode: 500, body: 'Proxy error: ' + e.message }));
       req.end();
     } catch (e) {
       resolve({ statusCode: 500, body: 'Invalid URL: ' + e.message });
