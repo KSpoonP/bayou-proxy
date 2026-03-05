@@ -194,18 +194,20 @@ exports.handler = async (event) => {
   const oOpen2=window.open;
   window.open=function(u,...r){return oOpen2.call(this,px(u),...r);};
 
-  // Intercept all link clicks and form submissions
+  // Intercept link clicks — only for external links not already proxied
   document.addEventListener('click', function(e){
     const a=e.target.closest('a');
     if(!a)return;
     const href=a.getAttribute('href');
-    if(!href||href.startsWith('#')||href.startsWith('javascript:'))return;
+    if(!href||href.startsWith('#')||href.startsWith('javascript:')||href.startsWith('mailto:'))return;
     try{
       const resolved=new URL(href, T).toString();
-      if(!resolved.startsWith(P)){
+      // Already going through proxy — leave it alone
+      if(href.startsWith(P)||href.startsWith('/.netlify'))return;
+      // Truly external — hand off to Bayou to navigate
+      if(!resolved.startsWith(window.location.origin)){
         e.preventDefault();
         e.stopPropagation();
-        // Post message to parent Bayou frame to navigate
         window.top.postMessage({type:'BAYOU_NAVIGATE',url:resolved},'*');
       }
     }catch(e2){}
