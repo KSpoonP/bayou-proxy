@@ -193,6 +193,52 @@ exports.handler = async (event) => {
   // Override window.open to proxy navigations
   const oOpen2=window.open;
   window.open=function(u,...r){return oOpen2.call(this,px(u),...r);};
+
+  // Intercept all link clicks and form submissions
+  document.addEventListener('click', function(e){
+    const a=e.target.closest('a');
+    if(!a)return;
+    const href=a.getAttribute('href');
+    if(!href||href.startsWith('#')||href.startsWith('javascript:'))return;
+    try{
+      const resolved=new URL(href, T).toString();
+      if(!resolved.startsWith(P)){
+        e.preventDefault();
+        e.stopPropagation();
+        // Post message to parent Bayou frame to navigate
+        window.top.postMessage({type:'BAYOU_NAVIGATE',url:resolved},'*');
+      }
+    }catch(e2){}
+  }, true);
+
+  // Intercept right-clicks and send to parent Bayou
+  document.addEventListener('contextmenu', function(e){
+    const a=e.target.closest('a');
+    const url=a?new URL(a.getAttribute('href')||'',T).toString():null;
+    if(url&&!url.startsWith('#')&&!url.startsWith('javascript:')){
+      e.preventDefault();
+      e.stopPropagation();
+      window.top.postMessage({type:'BAYOU_CONTEXTMENU',url,x:e.clientX,y:e.clientY},'*');
+    }
+  }, true);
+
+  // Intercept form submissions
+  document.addEventListener('submit', function(e){
+    const form=e.target;
+    const action=form.getAttribute('action');
+    if(!action)return;
+    try{
+      const resolved=new URL(action, T).toString();
+      if(!resolved.startsWith(P)){
+        e.preventDefault();
+        const method=(form.method||'GET').toUpperCase();
+        const data=new FormData(form);
+        const params=new URLSearchParams(data).toString();
+        const url=method==='GET'?resolved+(resolved.includes('?')?'&':'?')+params:resolved;
+        window.top.postMessage({type:'BAYOU_NAVIGATE',url:px(url)},'*');
+      }
+    }catch(e2){}
+  }, true);
 })();
 <\/script>`;
               text = text.replace(/<head>/i, '<head>' + interceptor);
