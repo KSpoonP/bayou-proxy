@@ -243,16 +243,40 @@ exports.handler = async (event) => {
   document.addEventListener('submit', function(e){
     const form=e.target;
     const action=form.getAttribute('action');
-    if(!action)return;
+    const method=(form.method||'GET').toUpperCase();
     try{
-      const resolved=new URL(action, T).toString();
-      if(!resolved.startsWith(P)){
-        e.preventDefault();
-        const method=(form.method||'GET').toUpperCase();
-        const data=new FormData(form);
-        const params=new URLSearchParams(data).toString();
-        const url=method==='GET'?resolved+(resolved.includes('?')?'&':'?')+params:resolved;
-        window.top.postMessage({type:'BAYOU_NAVIGATE',url:px(url)},'*');
+      const resolved=new URL(action||T, T).toString();
+      e.preventDefault();
+      e.stopPropagation();
+      if(method==='GET'){
+        const params=new URLSearchParams(new FormData(form)).toString();
+        const url=resolved+(resolved.includes('?')?'&':'?')+params;
+        window.top.postMessage({type:'BAYOU_NAVIGATE',url:resolved},'*');
+      } else {
+        // POST — send through proxy, capture cookies from response
+        const fd=new FormData(form);
+        const proxiedAction=px(resolved);
+        fetch(proxiedAction,{method:'POST',body:new URLSearchParams(fd),credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded'}})
+          .then(res=>{
+            // Harvest cookies from response headers
+            const cookies=res.headers.get('x-bayou-cookies');
+            const host=res.headers.get('x-bayou-cookie-host')||new URL(resolved).hostname;
+            if(cookies){
+              window.top.postMessage({type:'BAYOU_SET_COOKIES',host,cookies},'*');
+            }
+            // Navigate to wherever the server redirected us
+            const finalUrl=res.url||resolved;
+            // Strip proxy prefix to get real URL
+            const rel='/.netlify/functions/proxy?url=';
+            let dest=finalUrl;
+            if(finalUrl.includes(rel)){
+              try{dest=decodeURIComponent(finalUrl.slice(finalUrl.indexOf(rel)+rel.length));}catch(ex){}
+            }
+            window.top.postMessage({type:'BAYOU_NAVIGATE',url:dest},'*');
+          })
+          .catch(()=>{
+            window.top.postMessage({type:'BAYOU_NAVIGATE',url:resolved},'*');
+          });
       }
     }catch(e2){}
   }, true);
