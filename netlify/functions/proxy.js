@@ -159,6 +159,17 @@ exports.handler = async (event) => {
 
               const interceptor = `<script>
 (function(){
+  // Mask iframe detection — spoof window.top, window.parent, window.self to look like top-level
+  try {
+    Object.defineProperty(window, 'top', { get: function(){ return window; }, configurable: true });
+    Object.defineProperty(window, 'parent', { get: function(){ return window; }, configurable: true });
+    Object.defineProperty(window, 'frameElement', { get: function(){ return null; }, configurable: true });
+  } catch(e) {}
+  // Mask window.self === window.top check
+  try {
+    Object.defineProperty(window, 'self', { get: function(){ return window; }, configurable: true });
+  } catch(e) {}
+
   const P='/.netlify/functions/proxy?url=';
   const O='${origin}';
   const T='${target}';
