@@ -13,91 +13,86 @@ const STRIP_HEADERS = [
   'x-content-type-options',
   'strict-transport-security',
   'transfer-encoding',
+  // set-cookie handled manually via x-bayou-cookies
 ];
 
 exports.handler = async (event) => {
   const target = event.queryStringParameters?.url;
   if (!target) return { statusCode: 400, body: 'Missing url param' };
 
+  // Read stored cookies passed from Bayou's JS cookie jar
+  const storedCookies = event.queryStringParameters?.cookies || '';
+
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 204,
       headers: {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': '*',
-        'Access-Control-Allow-Credentials': 'true',
       },
       body: '',
     };
   }
 
-  const incomingCookies = event.headers?.cookie || event.headers?.Cookie || '';
-
   return new Promise((resolve) => {
     try {
       const parsed = new URL(target);
       const origin = parsed.origin;
+      const base = `${parsed.protocol}//${parsed.hostname}`;
       const PROXY = '/.netlify/functions/proxy?url=';
       const mod = parsed.protocol === 'https:' ? https : http;
-
-      const reqHeaders = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Upgrade-Insecure-Requests': '1',
-        'Origin': parsed.origin,
-        'Referer': parsed.origin + '/',
-      };
-
-      if (incomingCookies) reqHeaders['Cookie'] = incomingCookies;
-      if (event.headers?.['content-type']) reqHeaders['Content-Type'] = event.headers['content-type'];
 
       const options = {
         hostname: parsed.hostname,
         port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
         path: parsed.pathname + parsed.search,
         method: event.httpMethod || 'GET',
-        headers: reqHeaders,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Upgrade-Insecure-Requests': '1',
+          ...(storedCookies ? { 'Cookie': storedCookies } : {}),
+        },
       };
 
       const req = mod.request(options, (res) => {
         const safeHeaders = {
           'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
           'Access-Control-Allow-Headers': '*',
-          'Access-Control-Allow-Credentials': 'true',
         };
 
-        // multiValueHeaders required for set-cookie — Netlify rejects arrays in headers{}
-        const multiValueHeaders = {};
-
+        const setCookies = [];
         for (const [key, val] of Object.entries(res.headers)) {
           const k = key.toLowerCase();
           if (STRIP_HEADERS.includes(k)) continue;
-
-          // set-cookie MUST go into multiValueHeaders, never into headers{}
+          // Intercept set-cookie — don't let browser try to store them (wrong domain)
+          // Instead pack them into x-bayou-cookies so Bayou's JS can store them
           if (k === 'set-cookie') {
             const cookies = Array.isArray(val) ? val : [val];
-            multiValueHeaders['set-cookie'] = cookies.map(c =>
-              c
-                .replace(/;\s*Secure/gi, '')
-                .replace(/;\s*SameSite=(Strict|Lax|None)/gi, '; SameSite=None')
-                .replace(/;\s*Domain=[^;]*/gi, '')
-                + '; Secure'
-            );
+            cookies.forEach(c => {
+              // Extract just name=value, drop path/domain/secure/httponly/samesite
+              const nameVal = c.split(';')[0].trim();
+              if (nameVal) setCookies.push(nameVal);
+            });
             continue;
           }
-
           if (Array.isArray(val)) safeHeaders[key] = val.join(', ');
           else safeHeaders[key] = val;
+        }
+        // Pass captured cookies back to Bayou via custom header
+        if (setCookies.length > 0) {
+          safeHeaders['x-bayou-cookies'] = setCookies.join('; ');
+          safeHeaders['x-bayou-cookie-host'] = parsed.hostname;
         }
 
         if (safeHeaders['location']) {
@@ -120,7 +115,6 @@ exports.handler = async (event) => {
             resolve({
               statusCode: res.statusCode || 200,
               headers: safeHeaders,
-              multiValueHeaders,
               body: raw.toString('base64'),
               isBase64Encoded: true,
             });
@@ -173,16 +167,13 @@ exports.handler = async (event) => {
     }catch(e){return u;}
   }
   const oFetch=window.fetch;
-  window.fetch=function(input,init={}){
+  window.fetch=function(input,init){
     if(typeof input==='string')input=px(input);
     else if(input&&input.url)input=new Request(px(input.url),input);
-    if(!init.credentials)init.credentials='include';
     return oFetch.call(this,input,init);
   };
   const oOpen=XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open=function(m,u,...r){return oOpen.call(this,m,px(u),...r);};
-  const oSend=XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.send=function(...a){try{this.withCredentials=true;}catch(e){}return oSend.apply(this,a);};
   const oCreate=document.createElement.bind(document);
   document.createElement=function(tag,...a){
     const el=oCreate(tag,...a);
@@ -191,81 +182,90 @@ exports.handler = async (event) => {
       const attr=t==='link'?'href':'src';
       const proto=Object.getPrototypeOf(el);
       const desc=Object.getOwnPropertyDescriptor(proto,attr);
-      if(desc&&desc.set){Object.defineProperty(el,attr,{get(){return desc.get.call(this);},set(v){desc.set.call(this,px(v));},configurable:true});}
+      if(desc&&desc.set){
+        Object.defineProperty(el,attr,{
+          get(){return desc.get.call(this);},
+          set(v){desc.set.call(this,px(v));},
+          configurable:true
+        });
+      }
     }
     return el;
   };
   const oOpen2=window.open;
   window.open=function(u,...r){return oOpen2.call(this,px(u),...r);};
-  document.addEventListener('click',function(e){
+  document.addEventListener('click', function(e){
     const a=e.target.closest('a');
     if(!a)return;
     const href=a.getAttribute('href');
     if(!href||href.startsWith('#')||href.startsWith('javascript:')||href.startsWith('mailto:'))return;
     try{
-      const resolved=new URL(href,T).toString();
+      const resolved=new URL(href, T).toString();
       if(href.startsWith(P)||href.startsWith('/.netlify'))return;
-      if(!resolved.startsWith(window.location.origin)){e.preventDefault();e.stopPropagation();window.top.postMessage({type:'BAYOU_NAVIGATE',url:resolved},'*');}
-    }catch(e2){}
-  },true);
-  document.addEventListener('contextmenu',function(e){
-    const a=e.target.closest('a');
-    const url=a?new URL(a.getAttribute('href')||'',T).toString():null;
-    if(url&&!url.startsWith('#')&&!url.startsWith('javascript:')){e.preventDefault();e.stopPropagation();window.top.postMessage({type:'BAYOU_CONTEXTMENU',url,x:e.clientX,y:e.clientY},'*');}
-  },true);
-  document.addEventListener('submit',function(e){
-    const form=e.target;
-    const pwField=form.querySelector('input[type="password"]');
-    if(pwField&&pwField.value){
-      const userField=
-        form.querySelector('input[type="email"]')||
-        form.querySelector('input[name*="email"]')||
-        form.querySelector('input[name*="user"]')||
-        form.querySelector('input[name*="login"]')||
-        form.querySelector('input[type="text"]');
-      window.top.postMessage({
-        type:'BAYOU_CREDENTIALS',
-        site:window.location.hostname||T,
-        username:userField?userField.value:'',
-        password:pwField.value
-      },'*');
-    }
-  },true);
-  document.addEventListener('submit',function(e){
-    const form=e.target;
-    const action=form.getAttribute('action');
-    const method=(form.method||'GET').toUpperCase();
-    try{
-      const resolved=new URL(action||T,T).toString();
-      const proxied=px(resolved);
-      if(!action||proxied===action)return;
-      e.preventDefault();e.stopPropagation();
-      if(method==='GET'){
-        const params=new URLSearchParams(new FormData(form)).toString();
-        const url=resolved+(resolved.includes('?')?'&':'?')+params;
-        window.top.postMessage({type:'BAYOU_NAVIGATE',url:px(url)},'*');
-      }else{
-        const fd=new FormData(form);
-        fetch(px(resolved),{method:'POST',body:fd,credentials:'include'})
-          .then(r=>r.url&&window.top.postMessage({type:'BAYOU_NAVIGATE',url:r.url},'*'))
-          .catch(()=>{});
+      if(!resolved.startsWith(window.location.origin)){
+        e.preventDefault();
+        e.stopPropagation();
+        window.top.postMessage({type:'BAYOU_NAVIGATE',url:resolved},'*');
       }
     }catch(e2){}
-  },true);
-  // history.pushState patching removed — it caused infinite reload loops on SPAs like Instagram
+  }, true);
+  document.addEventListener('contextmenu', function(e){
+    const a=e.target.closest('a');
+    const url=a?new URL(a.getAttribute('href')||'',T).toString():null;
+    if(url&&!url.startsWith('#')&&!url.startsWith('javascript:')){
+      e.preventDefault();
+      e.stopPropagation();
+      window.top.postMessage({type:'BAYOU_CONTEXTMENU',url,x:e.clientX,y:e.clientY},'*');
+    }
+  }, true);
+  // Intercept document.cookie writes — capture and send to Bayou's cookie jar
+  const _cookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie') ||
+                      Object.getOwnPropertyDescriptor(HTMLDocument.prototype, 'cookie');
+  if (_cookieDesc && _cookieDesc.set) {
+    Object.defineProperty(document, 'cookie', {
+      get() { return _cookieDesc.get.call(this); },
+      set(val) {
+        _cookieDesc.set.call(this, val);
+        // Extract name=value and forward to Bayou
+        const nameVal = val.split(';')[0].trim();
+        if (nameVal) {
+          window.top.postMessage({
+            type: 'BAYOU_SET_COOKIES',
+            host: window.location.hostname,
+            cookies: nameVal
+          }, '*');
+        }
+      },
+      configurable: true
+    });
+  }
+
+  document.addEventListener('submit', function(e){
+    const form=e.target;
+    const action=form.getAttribute('action');
+    if(!action)return;
+    try{
+      const resolved=new URL(action, T).toString();
+      if(!resolved.startsWith(P)){
+        e.preventDefault();
+        const method=(form.method||'GET').toUpperCase();
+        const data=new FormData(form);
+        const params=new URLSearchParams(data).toString();
+        const url=method==='GET'?resolved+(resolved.includes('?')?'&':'?')+params:resolved;
+        window.top.postMessage({type:'BAYOU_NAVIGATE',url:px(url)},'*');
+      }
+    }catch(e2){}
+  }, true);
 })();
 <\/script>`;
-
               text = text.replace(/<head>/i, '<head>' + interceptor);
               text = text.replace(/<style([^>]*)>([\s\S]*?)<\/style>/gi, (match, attrs, css) => {
                 const fixedCss = css.replace(/url\(['"]?((?!data:)[^'"\)]+)['"]?\)/gi, (_, u) => `url('${resolveUrl(u)}')`);
                 return `<style${attrs}>${fixedCss}</style>`;
               });
-
             } else if (ct.includes('css')) {
-              text = text
-                .replace(/url\(['"]?((?!data:)[^'"\)]+)['"]?\)/gi, (_, u) => `url('${resolveUrl(u)}')`)
-                .replace(/@import\s+['"]([^'"]+)['"]/gi, (_, u) => `@import '${resolveUrl(u)}'`);
+              text = text.replace(/url\(['"]?((?!data:)[^'"\)]+)['"]?\)/gi, (_, u) => `url('${resolveUrl(u)}')`);
+              text = text.replace(/@import\s+['"]([^'"]+)['"]/gi, (_, u) => `@import '${resolveUrl(u)}'`);
             } else if (ct.includes('javascript')) {
               text = text
                 .replace(/fetch\(['"`](https?:\/\/[^'"`]+)['"`]/g, (_, u) => `fetch('${PROXY}${encodeURIComponent(u)}'`)
@@ -275,7 +275,6 @@ exports.handler = async (event) => {
             resolve({
               statusCode: res.statusCode || 200,
               headers: safeHeaders,
-              multiValueHeaders,
               body: text,
             });
           }
@@ -293,11 +292,8 @@ exports.handler = async (event) => {
       });
 
       req.on('error', e => resolve({ statusCode: 500, body: 'Proxy error: ' + e.message }));
-      if (event.body) {
-        req.write(event.isBase64Encoded ? Buffer.from(event.body, 'base64') : event.body);
-      }
+      if (event.body) req.write(event.body);
       req.end();
-
     } catch(e) {
       resolve({ statusCode: 500, body: 'Invalid URL: ' + e.message });
     }
