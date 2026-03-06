@@ -13,7 +13,6 @@ const STRIP_HEADERS = [
   'x-content-type-options',
   'strict-transport-security',
   'transfer-encoding',
-  // set-cookie intentionally NOT stripped — logins need it
 ];
 
 exports.handler = async (event) => {
@@ -77,14 +76,14 @@ exports.handler = async (event) => {
           'Access-Control-Allow-Credentials': 'true',
         };
 
-        // Netlify lambdas crash if you put an array in headers{}.
-        // set-cookie is always an array — it MUST go in multiValueHeaders{}.
+        // multiValueHeaders required for set-cookie — Netlify rejects arrays in headers{}
         const multiValueHeaders = {};
 
         for (const [key, val] of Object.entries(res.headers)) {
           const k = key.toLowerCase();
           if (STRIP_HEADERS.includes(k)) continue;
 
+          // set-cookie MUST go into multiValueHeaders, never into headers{}
           if (k === 'set-cookie') {
             const cookies = Array.isArray(val) ? val : [val];
             multiValueHeaders['set-cookie'] = cookies.map(c =>
@@ -159,17 +158,6 @@ exports.handler = async (event) => {
 
               const interceptor = `<script>
 (function(){
-  // Mask iframe detection — spoof window.top, window.parent, window.self to look like top-level
-  try {
-    Object.defineProperty(window, 'top', { get: function(){ return window; }, configurable: true });
-    Object.defineProperty(window, 'parent', { get: function(){ return window; }, configurable: true });
-    Object.defineProperty(window, 'frameElement', { get: function(){ return null; }, configurable: true });
-  } catch(e) {}
-  // Mask window.self === window.top check
-  try {
-    Object.defineProperty(window, 'self', { get: function(){ return window; }, configurable: true });
-  } catch(e) {}
-
   const P='/.netlify/functions/proxy?url=';
   const O='${origin}';
   const T='${target}';
@@ -225,7 +213,6 @@ exports.handler = async (event) => {
     const url=a?new URL(a.getAttribute('href')||'',T).toString():null;
     if(url&&!url.startsWith('#')&&!url.startsWith('javascript:')){e.preventDefault();e.stopPropagation();window.top.postMessage({type:'BAYOU_CONTEXTMENU',url,x:e.clientX,y:e.clientY},'*');}
   },true);
-  // ★ Credential detection — capture password fields on submit
   document.addEventListener('submit',function(e){
     const form=e.target;
     const pwField=form.querySelector('input[type="password"]');
@@ -244,7 +231,6 @@ exports.handler = async (event) => {
       },'*');
     }
   },true);
-  // Form submit navigation
   document.addEventListener('submit',function(e){
     const form=e.target;
     const action=form.getAttribute('action');
