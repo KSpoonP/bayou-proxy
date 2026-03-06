@@ -252,10 +252,7 @@ exports.handler = async (event) => {
       }
     }catch(e2){}
   },true);
-  const _push=history.pushState.bind(history);
-  const _replace=history.replaceState.bind(history);
-  history.pushState=function(s,t,u){if(u){try{const abs=new URL(u,T).toString();window.top.postMessage({type:'BAYOU_NAVIGATE',url:abs},'*');return;}catch(e){}} _push(s,t,u);};
-  history.replaceState=function(s,t,u){if(u){try{const abs=new URL(u,T).toString();window.top.postMessage({type:'BAYOU_NAVIGATE',url:abs},'*');return;}catch(e){}} _replace(s,t,u);};
+  // history.pushState patching removed — it caused infinite reload loops on SPAs like Instagram
 })();
 <\/script>`;
 
